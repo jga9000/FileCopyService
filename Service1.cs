@@ -20,7 +20,7 @@ namespace FileCopyService
 
         private List<string> filepathsToProcess;
         private BackgroundWorker backgroundFileCopier;
-        private const uint MAX_RETRIES_PER_FILE = 10;
+        private const uint MAX_WAIT_TIME = 60000;
 
 		/// <summary> 
 		/// Required designer variable.
@@ -190,7 +190,7 @@ namespace FileCopyService
 
             eventLog1.WriteEntry("filepathsToProcess.Count: " + filepathsToProcess.Count);
 
-            UInt16 retries = 0;
+            UInt16 waitTime = 0;
             while( filepathsToProcess.Count > 0)
             {
                 // Call ReportProgress to just update UI, if needed
@@ -219,41 +219,48 @@ namespace FileCopyService
                         eventLog1.WriteEntry("Copied.");
                         filepathsToProcess.RemoveAt(0);
                         eventLog1.WriteEntry("Removed from queue");
-                        retries = 0;
+                        waitTime = 0;
                     }
                     catch (Exception ex)
                     {
                         eventLog1.WriteEntry("Exception:" + ex.ToString());
 
+                        int hr = System.Runtime.InteropServices.Marshal.GetHRForException(ex);
+
+                        /*int hr = (int)ex.GetType().GetProperty("HResult",
+                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                            .GetValue(ex, null);*/
+
+                        eventLog1.WriteEntry("got the hr value:" + hr.ToString());
+
                         // If this file no longer exists then ignore it
-                        if (ex.Message.Contains("already exists"))
+                        if (((int)hr&0xFFFFFFFF) == 0xC00D001B)
                         {
                             eventLog1.WriteEntry("Already exists: " + filepathsToProcess[0]);
                             // Delete original even if cannot overwrite
                             File.Delete(filepathsToProcess[0]);
                             filepathsToProcess.RemoveAt(0);
-                            retries = 0;
+                            waitTime = 0;
                             eventLog1.WriteEntry("Removed from queue");
                         }
-
-                        else if (ex.Message.Contains("Could not find file"))
+                        else if (((int)hr&0xFFFFFFFF) == 0x80070020)  // -2147024864
                         {
-                            eventLog1.WriteEntry("File not found: " + filepathsToProcess[0]);
-                            filepathsToProcess.RemoveAt(0);
-                            retries = 0;
-                            eventLog1.WriteEntry("Removed from queue");
+                            eventLog1.WriteEntry("Cannot access file.. Waiting for file to become available.");
+                            Thread.Sleep(200);
+                            waitTime += 200;
+                            if (waitTime > MAX_WAIT_TIME)
+                            {
+                                waitTime = 0;
+                                filepathsToProcess.RemoveAt(0);
+                                eventLog1.WriteEntry("Timeout reached. Removed from queue");
+                            }
                         }
                         else
                         {
-                            eventLog1.WriteEntry("File is busy... Waiting for file to become available.");
-                            Thread.Sleep(200);
-                            retries++;
-                            if (retries > MAX_RETRIES_PER_FILE)
-                            {
-                                retries = 0;
-                                filepathsToProcess.RemoveAt(0);
-                                eventLog1.WriteEntry("Max retries reached. Removed from queue");
-                            }
+                            eventLog1.WriteEntry("Unhandled: " + filepathsToProcess[0]);
+                            filepathsToProcess.RemoveAt(0);
+                            waitTime = 0;
+                            eventLog1.WriteEntry("Removed from queue");
                         }
                     }
                 }
