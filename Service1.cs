@@ -18,9 +18,9 @@ namespace FileCopyService
         private const string path1 = @"C:\temp_1\";
         private const string path2 = @"C:\temp_2\";
 
-        private List<string> filepathsToProcess;
-        private BackgroundWorker backgroundFileCopier;
+        //private BackgroundWorker backgroundFileCopier;
         private const uint MAX_WAIT_TIME = 60000;
+        List<Thread> threads = new List<Thread>();
 
 		/// <summary> 
 		/// Required designer variable.
@@ -38,44 +38,7 @@ namespace FileCopyService
 			}
 
             eventLog1.Source = "FileCopyLogSource";
-            eventLog1.Log = "FileCopyLog";
-			
-		}
-        // Set up the BackgroundWorker object by  
-        // attaching event handlers.  
-        private void InitializeBackgroundWorker()
-        {
-            eventLog1.WriteEntry("InitializeBackgroundWorker");
-            backgroundFileCopier = new System.ComponentModel.BackgroundWorker();
-
-            backgroundFileCopier.WorkerReportsProgress = true;
-            backgroundFileCopier.WorkerSupportsCancellation = true;
-
-            backgroundFileCopier.DoWork +=
-                new DoWorkEventHandler(backgroundFileCopier_DoWork);
-            backgroundFileCopier.RunWorkerCompleted +=
-                new RunWorkerCompletedEventHandler(
-            backgroundFileCopier_RunWorkerCompleted);
-            backgroundFileCopier.ProgressChanged +=
-                new ProgressChangedEventHandler(
-            backgroundFileCopier_ProgressChanged);
-        }
-
-
-		// The main entry point for the process
-		static void Main()
-		{
-			System.ServiceProcess.ServiceBase[] ServicesToRun;
-	
-			// More than one user Service may run within the same process. To add
-			// another service to this process, change the following line to
-			// create a second service object. For example,
-			//
-			//   ServicesToRun = New System.ServiceProcess.ServiceBase[] {new Service1(), new MySecondUserService()};
-			//
-            ServicesToRun = new System.ServiceProcess.ServiceBase[] { new FileCopyService.Service1() };
-
-			System.ServiceProcess.ServiceBase.Run(ServicesToRun);	
+            eventLog1.Log = "FileCopyLog";			
 		}
 
 		/// <summary> 
@@ -104,7 +67,7 @@ namespace FileCopyService
 		/// </summary>
 		protected override void Dispose( bool disposing )
 		{
-			if( disposing )
+			if (disposing)
 			{
 				if (components != null) 
 				{
@@ -121,17 +84,12 @@ namespace FileCopyService
 		{
             eventLog1.WriteEntry("FileCopyService started");
 
-            // FileCopy related functionality
-            filepathsToProcess = new List<string>();
-
             // Copy existing files before starting
             foreach (string newPath in Directory.GetFiles(path1, "*.*",
                 SearchOption.AllDirectories))
                 File.Move(newPath, newPath.Replace(path1, path2));
 
-            InitializeBackgroundWorker();
             CreateWatcher();
- 
 		}
  
 		/// <summary>
@@ -141,6 +99,14 @@ namespace FileCopyService
 		{
 			// TODO: Add code here to perform any tear-down necessary to stop your service.
 			eventLog1.WriteEntry("Service stopped");
+
+            // Stop all threads
+            foreach (Thread t in threads) {
+                if (t.IsAlive) {
+                    eventLog1.WriteEntry("Aborting active thread");
+                    t.Abort();
+                }
+            }
 		}
 		protected override void OnContinue()
 		{
@@ -159,7 +125,7 @@ namespace FileCopyService
 
             //Subscribe to the Created event.
             watcher.Created += new
-            FileSystemEventHandler(watcher_FileCreated);
+                FileSystemEventHandler(watcher_FileCreated);
 
             //Set the path to C:\Temp\
             watcher.Path = path1;
@@ -169,128 +135,98 @@ namespace FileCopyService
             eventLog1.WriteEntry("..created");
         }
 
-
         void watcher_FileCreated(object sender, FileSystemEventArgs e)
         {
             eventLog1.WriteEntry("A new file detected!: " + e.FullPath);
-            if (backgroundFileCopier.IsBusy != true)
-            {
-                // Start the asynchronous operation, if not yet started
-                backgroundFileCopier.RunWorkerAsync();
-            }
-            filepathsToProcess.Add(e.FullPath);
-            eventLog1.WriteEntry("Added to queue.");
+            // Create thread for the new operation
+            CreateNewCopierThread(e.FullPath);
+
+            eventLog1.WriteEntry("New thread started");
         }
 
-        // This event handler is where the time-consuming work is done. 
-        private void backgroundFileCopier_DoWork(object sender, DoWorkEventArgs e)
+        // Create new thread object  
+        private void CreateNewCopierThread(string filepath)
         {
-            eventLog1.WriteEntry("backgroundFileCopier_DoWork");
-            BackgroundWorker worker = sender as BackgroundWorker;
+            Thread t = new Thread(ThreadFunction);
+            threads.Add(t);
+            t.Start(filepath);
+        }
 
-            eventLog1.WriteEntry("filepathsToProcess.Count: " + filepathsToProcess.Count);
+        // This is called once for each thread
+        public void ThreadFunction(object data)
+        {
+            string filepath = data.ToString();
+            eventLog1.WriteEntry("ThreadFunction");
 
-            UInt16 waitTime = 0;
-            while( filepathsToProcess.Count > 0)
+            CopyFile(filepath, 0);
+            eventLog1.WriteEntry("ThreadFunction exit");
+        }
+
+        // Actual copying function, called from ThreadFunction
+        private void CopyFile(string filepath, int waitTime)
+        {
+            eventLog1.WriteEntry("CopyFile, path:" + filepath +
+                                 ", waitTime:" + waitTime);
+            try
             {
-                // Call ReportProgress to just update UI, if needed
-                worker.ReportProgress(0); 
+                StringBuilder sb = new StringBuilder();
+                sb.Append(path2 + Path.GetFileName(filepath));
 
-                if (worker.CancellationPending == true)
+                eventLog1.WriteEntry("filepath1: " + filepath);
+                eventLog1.WriteEntry("filepath2: " + sb.ToString());
+                File.Move(filepath, sb.ToString());
+                // Success
+                eventLog1.WriteEntry("Copied.");
+            }
+            catch (Exception ex)
+            {
+                eventLog1.WriteEntry("Exception:" + ex.ToString());
+
+                int hr = System.Runtime.InteropServices.Marshal.GetHRForException(ex);
+
+                eventLog1.WriteEntry("Err#:" + hr.ToString());
+
+                // If this file no longer exists then ignore it
+                if (((int)hr & 0xFFFFFFFF) == 0xC00D001B)
                 {
-                    eventLog1.WriteEntry("CancellationPending");
-                    e.Cancel = true;
-                    foreach (var i in filepathsToProcess)
+                    eventLog1.WriteEntry("Already exists: " + filepath);
+                    // Delete original even if cannot overwrite
+                    File.Delete(filepath);
+                }
+                else if (((int)hr & 0xFFFFFFFF) == 0x80070020)  // -2147024864
+                {
+                    eventLog1.WriteEntry("Cannot access file.. Waiting for file to become available.");
+                    Thread.Sleep(200);
+                    if (waitTime < MAX_WAIT_TIME)
                     {
-                        filepathsToProcess.Remove(i);
+                        CopyFile(filepath, waitTime + 200);
+                    }
+                    else
+                    {
+                        eventLog1.WriteEntry("Timeout reached.");
                     }
                 }
                 else
                 {
-                    try
-                    {
-                        StringBuilder sb = new StringBuilder();
-                        sb.Append(path2 + Path.GetFileName(filepathsToProcess[0]));
-
-                        eventLog1.WriteEntry("filepath1: " + filepathsToProcess[0]);
-                        eventLog1.WriteEntry("filepath2: " + sb.ToString());
-                        File.Move(filepathsToProcess[0], sb.ToString());
-                        // Success
-                        eventLog1.WriteEntry("Copied.");
-                        filepathsToProcess.RemoveAt(0);
-                        eventLog1.WriteEntry("Removed from queue");
-                        waitTime = 0;
-                    }
-                    catch (Exception ex)
-                    {
-                        eventLog1.WriteEntry("Exception:" + ex.ToString());
-
-                        int hr = System.Runtime.InteropServices.Marshal.GetHRForException(ex);
-
-                        /*int hr = (int)ex.GetType().GetProperty("HResult",
-                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-                            .GetValue(ex, null);*/
-
-                        eventLog1.WriteEntry("got the hr value:" + hr.ToString());
-
-                        // If this file no longer exists then ignore it
-                        if (((int)hr&0xFFFFFFFF) == 0xC00D001B)
-                        {
-                            eventLog1.WriteEntry("Already exists: " + filepathsToProcess[0]);
-                            // Delete original even if cannot overwrite
-                            File.Delete(filepathsToProcess[0]);
-                            filepathsToProcess.RemoveAt(0);
-                            waitTime = 0;
-                            eventLog1.WriteEntry("Removed from queue");
-                        }
-                        else if (((int)hr&0xFFFFFFFF) == 0x80070020)  // -2147024864
-                        {
-                            eventLog1.WriteEntry("Cannot access file.. Waiting for file to become available.");
-                            Thread.Sleep(200);
-                            waitTime += 200;
-                            if (waitTime > MAX_WAIT_TIME)
-                            {
-                                waitTime = 0;
-                                filepathsToProcess.RemoveAt(0);
-                                eventLog1.WriteEntry("Timeout reached. Removed from queue");
-                            }
-                        }
-                        else
-                        {
-                            eventLog1.WriteEntry("Unhandled: " + filepathsToProcess[0]);
-                            filepathsToProcess.RemoveAt(0);
-                            waitTime = 0;
-                            eventLog1.WriteEntry("Removed from queue");
-                        }
-                    }
+                    eventLog1.WriteEntry("Unhandled: " + filepath);
                 }
             }
-            eventLog1.WriteEntry("DONE!");
-            worker.ReportProgress(100);
         }
 
-        // This event handler updates the progress. 
-        private void backgroundFileCopier_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        // The main entry point for the process
+        public static void Main()
         {
-            eventLog1.WriteEntry("backgroundFileCopier_ProgressChanged");
-            // update UI or smt here
-        }
+            System.ServiceProcess.ServiceBase[] ServicesToRun;
 
-        // This event handler deals with the results of the background operation. 
-        private void backgroundFileCopier_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {
-            if (e.Cancelled == true)
-            {
-                eventLog1.WriteEntry("Canceled!");
-            }
-            else if (e.Error != null)
-            {
-                eventLog1.WriteEntry("Error: " + e.Error.Message);
-            }
-            else
-            {
-                eventLog1.WriteEntry("Completed");
-            }
+            // More than one user Service may run within the same process. To add
+            // another service to this process, change the following line to
+            // create a second service object. For example,
+            //
+            //   ServicesToRun = New System.ServiceProcess.ServiceBase[] {new Service1(), new MySecondUserService()};
+            //
+            ServicesToRun = new System.ServiceProcess.ServiceBase[] { new FileCopyService.Service1() };
+
+            System.ServiceProcess.ServiceBase.Run(ServicesToRun);
         }
-	}
+    }
 }
